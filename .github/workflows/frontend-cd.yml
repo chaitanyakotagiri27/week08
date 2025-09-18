@@ -1,6 +1,41 @@
-# add (or ensure) these two repo secrets:
-# ACR_NAME = sit722w08ck6111
-# ACR_LOGIN_SERVER = sit722w08ck6111.azurecr.io
+# .github/workflows/frontend-cd.yml
+name: CD - Deploy Frontend to AKS
+
+on:
+  workflow_dispatch:
+    inputs:
+      product_api_ip:
+        description: "External IP of Product Service (http://X.X.X.X:8000)"
+        required: true
+        default: "http://<ip_address>:8000"
+      order_api_ip:
+        description: "External IP of Order Service (http://Y.Y.Y.Y:8001)"
+        required: true
+        default: "http://<ip_address>:8001"
+      aks_cluster_name:
+        description: "Name of the AKS Cluster to deploy to"
+        required: true
+        default: "sit722-w08-aks"
+      aks_resource_group:
+        description: "Resource Group of the AKS Cluster"
+        required: true
+        default: "sit722-w08-rg"
+
+  workflow_call:
+    inputs:
+      product_api_ip:     { type: string, required: true }
+      order_api_ip:       { type: string, required: true }
+      aks_cluster_name:   { type: string, required: true }
+      aks_resource_group: { type: string, required: true }
+
+jobs:
+  deploy_frontend:
+    runs-on: ubuntu-latest
+    environment: Production
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
       - name: Azure Login
         uses: azure/login@v1
@@ -9,17 +44,18 @@
 
       - name: Login to Azure Container Registry
         env:
-          ACR_NAME: ${{ secrets.ACR_NAME }}
+          ACR_NAME: ${{ secrets.ACR_NAME }}              # e.g. sit722w08ck6111
         run: az acr login --name "$ACR_NAME"
 
       - name: Inject Backend IPs into Frontend main.js
         run: |
           sed -i "s|_PRODUCT_API_URL_|${{ inputs.product_api_ip }}|g" frontend/main.js
           sed -i "s|_ORDER_API_URL_|${{ inputs.order_api_ip }}|g"   frontend/main.js
+          echo "---- main.js ----"; sed -n '1,40p' frontend/main.js
 
       - name: Build and Push Frontend Image
         env:
-          REG: ${{ secrets.ACR_LOGIN_SERVER }}
+          REG: ${{ secrets.ACR_LOGIN_SERVER }}           # e.g. sit722w08ck6111.azurecr.io
         run: |
           docker build -t $REG/frontend_service:latest ./frontend
           docker push $REG/frontend_service:latest
@@ -32,3 +68,6 @@
 
       - name: Deploy Frontend to AKS
         run: kubectl apply -f k8s/frontend.yaml
+
+      - name: Logout from Azure
+        run: az logout
