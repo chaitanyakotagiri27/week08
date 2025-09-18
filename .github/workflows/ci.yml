@@ -1,4 +1,4 @@
-﻿name: CI - Build, Test & Push (backend + frontend)
+name: CI - Build, Test & Push (backend + frontend)
 
 on:
   push:
@@ -38,14 +38,14 @@ jobs:
 
       - name: Build & Push product_service
         run: |
-          docker build -t $ACR_LOGIN_SERVER/product_service:${{ steps.meta.outputs.sha }} ./backend/product
+          docker build -t $ACR_LOGIN_SERVER/product_service:${{ steps.meta.outputs.sha }} ./backend/product_service
           docker push $ACR_LOGIN_SERVER/product_service:${{ steps.meta.outputs.sha }}
           docker tag  $ACR_LOGIN_SERVER/product_service:${{ steps.meta.outputs.sha }} $ACR_LOGIN_SERVER/product_service:latest
           docker push $ACR_LOGIN_SERVER/product_service:latest
 
       - name: Build & Push order_service
         run: |
-          docker build -t $ACR_LOGIN_SERVER/order_service:${{ steps.meta.outputs.sha }} ./backend/order
+          docker build -t $ACR_LOGIN_SERVER/order_service:${{ steps.meta.outputs.sha }} ./backend/order_service
           docker push $ACR_LOGIN_SERVER/order_service:${{ steps.meta.outputs.sha }}
           docker tag  $ACR_LOGIN_SERVER/order_service:${{ steps.meta.outputs.sha }} $ACR_LOGIN_SERVER/order_service:latest
           docker push $ACR_LOGIN_SERVER/order_service:latest
