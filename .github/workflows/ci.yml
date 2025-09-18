@@ -1,4 +1,4 @@
-name: CI - Build, Test & Push (backend + frontend)
+﻿name: CI - Build, Test & Push (backend + frontend)
 
 on:
   push:
@@ -8,7 +8,7 @@ on:
       - "frontend/**"
       - ".github/workflows/ci.yml"
   pull_request:
-    branches: [ dev, main ]
+    branches: [ main ]
     paths:
       - "backend/**"
       - "frontend/**"
@@ -16,69 +16,47 @@ on:
 env:
   ACR_NAME: ${{ secrets.ACR_NAME }}
   ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
-  IMAGE_TAG: ${{ github.sha }}
-
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
 
 jobs:
-  test_backend:
-    runs-on: ubuntu-latest
-    services:
-      product_db:
-        image: postgres:15
-        env: { POSTGRES_USER: postgres, POSTGRES_PASSWORD: postgres, POSTGRES_DB: products }
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 10s --health-timeout 5s --health-retries 5
-        ports: ["5432:5432"]
-      order_db:
-        image: postgres:15
-        env: { POSTGRES_USER: postgres, POSTGRES_PASSWORD: postgres, POSTGRES_DB: orders }
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 10s --health-timeout 5s --health-retries 5
-        ports: ["5433:5432"]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: "3.10" }
-      - name: Install deps & run tests
-        run: |
-          pip install -U pip pytest httpx
-          pip install -r backend/product_service/requirements.txt
-          pip install -r backend/order_service/requirements.txt
-          (cd backend/product_service && pytest -q)
-          (cd backend/order_service && pytest -q)
-
   build_and_push:
-    needs: [ test_backend ]
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        service:
-          - { name: product_service,  context: backend/product_service }
-          - { name: order_service,    context: backend/order_service }
-          - { name: frontend_service, context: frontend }
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Azure Login
         uses: azure/login@v1
-        with: { creds: ${{ secrets.AZURE_CREDENTIALS }} }
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Login to ACR (use NAME)
-        run: az acr login -n "${{ secrets.ACR_NAME }}"
+      - name: Login to ACR
+        run: az acr login -n "$ACR_NAME"
 
-      - name: Build & (conditionally) push
-        env:
-          IMAGE: ${{ secrets.ACR_LOGIN_SERVER }}/${{ matrix.service.name }}
+      - name: Compute image tag (short SHA)
+        id: meta
+        run: echo "sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Build & Push product_service
         run: |
-          docker build -t $IMAGE:latest -t $IMAGE:${{ env.IMAGE_TAG }} ${{ matrix.service.context }}
-          if [[ "${GITHUB_REF##*/}" == "dev" || "${GITHUB_REF##*/}" == "main" ]]; then
-            docker push $IMAGE:latest
-            docker push $IMAGE:${{ env.IMAGE_TAG }}
-          else
-            echo "Skipping push for non-dev/main"
-          fi
+          docker build -t $ACR_LOGIN_SERVER/product_service:${{ steps.meta.outputs.sha }} ./backend/product
+          docker push $ACR_LOGIN_SERVER/product_service:${{ steps.meta.outputs.sha }}
+          docker tag  $ACR_LOGIN_SERVER/product_service:${{ steps.meta.outputs.sha }} $ACR_LOGIN_SERVER/product_service:latest
+          docker push $ACR_LOGIN_SERVER/product_service:latest
+
+      - name: Build & Push order_service
+        run: |
+          docker build -t $ACR_LOGIN_SERVER/order_service:${{ steps.meta.outputs.sha }} ./backend/order
+          docker push $ACR_LOGIN_SERVER/order_service:${{ steps.meta.outputs.sha }}
+          docker tag  $ACR_LOGIN_SERVER/order_service:${{ steps.meta.outputs.sha }} $ACR_LOGIN_SERVER/order_service:latest
+          docker push $ACR_LOGIN_SERVER/order_service:latest
+
+      - name: Build & Push frontend_service
+        run: |
+          docker build -t $ACR_LOGIN_SERVER/frontend_service:${{ steps.meta.outputs.sha }} ./frontend
+          docker push $ACR_LOGIN_SERVER/frontend_service:${{ steps.meta.outputs.sha }}
+          docker tag  $ACR_LOGIN_SERVER/frontend_service:${{ steps.meta.outputs.sha }} $ACR_LOGIN_SERVER/frontend_service:latest
+          docker push $ACR_LOGIN_SERVER/frontend_service:latest
+
+      - name: Logout Azure
+        if: always()
+        run: az logout

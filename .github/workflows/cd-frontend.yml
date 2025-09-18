@@ -1,78 +1,60 @@
-name: CD - Deploy Frontend to AKS
+﻿name: CD - Deploy Frontend to AKS
 
 on:
-  workflow_run:
-    workflows: ["CD - Deploy Backend to AKS"]
-    types: [completed]
   workflow_dispatch:
+    inputs:
+      environment:
+        description: "dev or prod"
+        required: true
+        default: "dev"
 
 env:
   ACR_NAME: ${{ secrets.ACR_NAME }}
   ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
-  SHA: ${{ github.sha }}
-
-concurrency:
-  group: cd-frontend-${{ github.ref }}
-  cancel-in-progress: true
+  AKS_RG: ${{ secrets.AKS_RG }}
+  AKS_CLUSTER: ${{ secrets.AKS_CLUSTER }}
+  PRODUCT_API: http://4.198.5.76:8000
+  ORDER_API:   http://4.237.146.141:8001
 
 jobs:
   deploy_frontend:
-    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
-    environment: ${{ github.ref_name == 'main' && 'prod' || 'dev' }}
-
+    environment: ${{ inputs.environment }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Azure Login
         uses: azure/login@v1
-        with: { creds: ${{ secrets.AZURE_CREDENTIALS }} }
-
-      - name: Get AKS context
-        run: az aks get-credentials -g "${{ secrets.AKS_RG }}" -n "${{ secrets.AKS_CLUSTER }}" --overwrite-existing
-
-      - name: Download backend IPs artifact (if available)
-        uses: actions/download-artifact@v4
-        with: { name: backend-ips, path: ./ips }
-        continue-on-error: true
-
-      - name: Read IPs (fallback to live)
-        id: read
-        shell: bash
-        run: |
-          set -e
-          if [[ -f ips/product_ip.txt && -f ips/order_ip.txt ]]; then
-            PRODUCT=$(cut -d= -f2 ips/product_ip.txt)
-            ORDER=$(cut -d= -f2 ips/order_ip.txt)
-          else
-            PRODUCT=$(kubectl get svc product-service-w08e1 -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-            ORDER=$(kubectl get svc order-service-w08e1   -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-          fi
-          echo "PRODUCT=$PRODUCT" >> $GITHUB_ENV
-          echo "ORDER=$ORDER"     >> $GITHUB_ENV
-          echo "Product=$PRODUCT; Order=$ORDER"
-
-      - name: Inject backend URLs into frontend
-        run: |
-          sed -i "s|_PRODUCT_API_URL_|http://${PRODUCT}:8000|g" frontend/main.js
-          sed -i "s|_ORDER_API_URL_|http://${ORDER}:8001|g"   frontend/main.js
-          head -n 20 frontend/main.js
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
 
       - name: Login to ACR
         run: az acr login -n "$ACR_NAME"
 
-      - name: Build & push image
-        env: { IMAGE: ${{ env.ACR_LOGIN_SERVER }}/frontend_service }
+      - name: Inject backend URLs into frontend/main.js
         run: |
-          docker build -t $IMAGE:latest -t $IMAGE:${SHA} ./frontend
-          docker push  $IMAGE:latest
-          docker push  $IMAGE:${SHA}
+          sed -i "s|_PRODUCT_API_URL_|${PRODUCT_API}|g" frontend/main.js
+          sed -i "s|_ORDER_API_URL_|${ORDER_API}|g"   frontend/main.js
+          head -n 15 frontend/main.js
 
-      - name: Deploy to AKS
-        env: { IMAGE: ${{ env.ACR_LOGIN_SERVER }}/frontend_service }
+      - name: Build & Push frontend
         run: |
+          docker build -t $ACR_LOGIN_SERVER/frontend_service:latest ./frontend
+          docker push $ACR_LOGIN_SERVER/frontend_service:latest
+
+      - name: Set kubectl context
+        uses: azure/aks-set-context@v3
+        with:
+          resource-group: ${{ env.AKS_RG }}
+          cluster-name: ${{ env.AKS_CLUSTER }}
+
+      - name: Apply frontend (use latest)
+        run: |
+          sed -i "s#image: .*/frontend_service:.*#image: $ACR_LOGIN_SERVER/frontend_service:latest#g" k8s/frontend.yaml
           kubectl apply -f k8s/frontend.yaml
-          C=$(kubectl get deploy frontend -o jsonpath='{.spec.template.spec.containers[0].name}')
-          kubectl set image deploy/frontend $C=$IMAGE:${SHA}
           kubectl rollout status deploy/frontend --timeout=180s
-          kubectl get svc -o wide
+
+      - name: Logout Azure
+        if: always()
+        run: az logout

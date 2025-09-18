@@ -1,66 +1,53 @@
-name: CD - Deploy Backend to AKS
+﻿name: CD - Deploy Backend to AKS
 
 on:
-  workflow_run:
-    workflows: ["CI - Build, Test & Push (backend + frontend)"]
-    types: [completed]
   workflow_dispatch:
+    inputs:
+      environment:
+        description: "dev or prod"
+        required: true
+        default: "dev"
 
 env:
+  ACR_NAME: ${{ secrets.ACR_NAME }}
   ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
-
-concurrency:
-  group: cd-backend-${{ github.ref }}
-  cancel-in-progress: true
+  AKS_RG: ${{ secrets.AKS_RG }}
+  AKS_CLUSTER: ${{ secrets.AKS_CLUSTER }}
 
 jobs:
-  deploy:
-    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+  deploy_backend:
     runs-on: ubuntu-latest
-    environment: ${{ github.ref_name == 'main' && 'prod' || 'dev' }}
-
+    environment: ${{ inputs.environment }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Azure Login
         uses: azure/login@v1
-        with: { creds: ${{ secrets.AZURE_CREDENTIALS }} }
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Set AKS context
-        run: az aks get-credentials -g "${{ secrets.AKS_RG }}" -n "${{ secrets.AKS_CLUSTER }}" --overwrite-existing
+      - name: Login to ACR
+        run: az acr login -n "$ACR_NAME"
 
-      - name: Deploy DBs + Services
+      - name: Set kubectl context
+        uses: azure/aks-set-context@v3
+        with:
+          resource-group: ${{ env.AKS_RG }}
+          cluster-name: ${{ env.AKS_CLUSTER }}
+
+      - name: Apply product & order services (use latest)
         run: |
-          kubectl apply -f k8s/configmaps.yaml
-          kubectl apply -f k8s/secrets.yaml
-          kubectl apply -f k8s/product-db.yaml
-          kubectl apply -f k8s/order-db.yaml
+          sed -i "s#image: .*/product_service:.*#image: $ACR_LOGIN_SERVER/product_service:latest#g" k8s/product-service.yaml
+          sed -i "s#image: .*/order_service:.*#image: $ACR_LOGIN_SERVER/order_service:latest#g"   k8s/order-service.yaml
           kubectl apply -f k8s/product-service.yaml
           kubectl apply -f k8s/order-service.yaml
 
-      - name: Rollout images to this CI SHA
-        env:
-          SHA: ${{ github.sha }}
-          REG: ${{ env.ACR_LOGIN_SERVER }}
+      - name: Wait for rollouts
         run: |
-          P=$(kubectl get deploy product-service-w08e1 -o jsonpath='{.spec.template.spec.containers[0].name}')
-          O=$(kubectl get deploy order-service-w08e1   -o jsonpath='{.spec.template.spec.containers[0].name}')
-          kubectl set image deploy/product-service-w08e1 $P=$REG/product_service:$SHA
-          kubectl set image deploy/order-service-w08e1   $O=$REG/order_service:$SHA
           kubectl rollout status deploy/product-service-w08e1 --timeout=180s
           kubectl rollout status deploy/order-service-w08e1   --timeout=180s
 
-      - name: Capture backend IPs
-        id: ips
-        run: |
-          PIP=$(kubectl get svc product-service-w08e1 -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-          OIP=$(kubectl get svc order-service-w08e1   -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-          echo "PRODUCT=$PIP" | tee product_ip.txt
-          echo "ORDER=$OIP"   | tee order_ip.txt
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: backend-ips
-          path: |
-            product_ip.txt
-            order_ip.txt
+      - name: Logout Azure
+        if: always()
+        run: az logout
