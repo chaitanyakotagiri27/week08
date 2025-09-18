@@ -1,0 +1,60 @@
+﻿name: CD - Deploy Frontend to AKS
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "dev or prod"
+        required: true
+        default: "dev"
+
+env:
+  ACR_NAME: ${{ secrets.ACR_NAME }}
+  ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+  AKS_RG: ${{ secrets.AKS_RG }}
+  AKS_CLUSTER: ${{ secrets.AKS_CLUSTER }}
+  PRODUCT_API: http://4.198.5.76:8000
+  ORDER_API:   http://4.237.146.141:8001
+
+jobs:
+  deploy_frontend:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Login to ACR
+        run: az acr login -n "$ACR_NAME"
+
+      - name: Inject backend URLs into frontend/main.js
+        run: |
+          sed -i "s|_PRODUCT_API_URL_|${PRODUCT_API}|g" frontend/main.js
+          sed -i "s|_ORDER_API_URL_|${ORDER_API}|g"   frontend/main.js
+          head -n 15 frontend/main.js
+
+      - name: Build & Push frontend
+        run: |
+          docker build -t $ACR_LOGIN_SERVER/frontend_service:latest ./frontend
+          docker push $ACR_LOGIN_SERVER/frontend_service:latest
+
+      - name: Set kubectl context
+        uses: azure/aks-set-context@v3
+        with:
+          resource-group: ${{ env.AKS_RG }}
+          cluster-name: ${{ env.AKS_CLUSTER }}
+
+      - name: Apply frontend (use latest)
+        run: |
+          sed -i "s#image: .*/frontend_service:.*#image: $ACR_LOGIN_SERVER/frontend_service:latest#g" k8s/frontend.yaml
+          kubectl apply -f k8s/frontend.yaml
+          kubectl rollout status deploy/frontend --timeout=180s
+
+      - name: Logout Azure
+        if: always()
+        run: az logout

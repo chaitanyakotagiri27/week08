@@ -1,0 +1,62 @@
+name: CI - Build, Test & Push (backend + frontend)
+
+on:
+  push:
+    branches: [ dev, main ]
+    paths:
+      - "backend/**"
+      - "frontend/**"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    branches: [ main ]
+    paths:
+      - "backend/**"
+      - "frontend/**"
+
+env:
+  ACR_NAME: ${{ secrets.ACR_NAME }}
+  ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+
+jobs:
+  build_and_push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Login to ACR
+        run: az acr login -n "$ACR_NAME"
+
+      - name: Compute image tag (short SHA)
+        id: meta
+        run: echo "sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Build & Push product_service
+        run: |
+          docker build -t $ACR_LOGIN_SERVER/product_service:${{ steps.meta.outputs.sha }} ./backend/product_service
+          docker push $ACR_LOGIN_SERVER/product_service:${{ steps.meta.outputs.sha }}
+          docker tag  $ACR_LOGIN_SERVER/product_service:${{ steps.meta.outputs.sha }} $ACR_LOGIN_SERVER/product_service:latest
+          docker push $ACR_LOGIN_SERVER/product_service:latest
+
+      - name: Build & Push order_service
+        run: |
+          docker build -t $ACR_LOGIN_SERVER/order_service:${{ steps.meta.outputs.sha }} ./backend/order_service
+          docker push $ACR_LOGIN_SERVER/order_service:${{ steps.meta.outputs.sha }}
+          docker tag  $ACR_LOGIN_SERVER/order_service:${{ steps.meta.outputs.sha }} $ACR_LOGIN_SERVER/order_service:latest
+          docker push $ACR_LOGIN_SERVER/order_service:latest
+
+      - name: Build & Push frontend_service
+        run: |
+          docker build -t $ACR_LOGIN_SERVER/frontend_service:${{ steps.meta.outputs.sha }} ./frontend
+          docker push $ACR_LOGIN_SERVER/frontend_service:${{ steps.meta.outputs.sha }}
+          docker tag  $ACR_LOGIN_SERVER/frontend_service:${{ steps.meta.outputs.sha }} $ACR_LOGIN_SERVER/frontend_service:latest
+          docker push $ACR_LOGIN_SERVER/frontend_service:latest
+
+      - name: Logout Azure
+        if: always()
+        run: az logout
