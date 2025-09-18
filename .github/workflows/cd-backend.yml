@@ -1,0 +1,66 @@
+name: CD - Deploy Backend to AKS
+
+on:
+  workflow_run:
+    workflows: ["CI - Build, Test & Push (backend + frontend)"]
+    types: [completed]
+  workflow_dispatch:
+
+env:
+  ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+
+concurrency:
+  group: cd-backend-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref_name == 'main' && 'prod' || 'dev' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v1
+        with: { creds: ${{ secrets.AZURE_CREDENTIALS }} }
+
+      - name: Set AKS context
+        run: az aks get-credentials -g "${{ secrets.AKS_RG }}" -n "${{ secrets.AKS_CLUSTER }}" --overwrite-existing
+
+      - name: Deploy DBs + Services
+        run: |
+          kubectl apply -f k8s/configmaps.yaml
+          kubectl apply -f k8s/secrets.yaml
+          kubectl apply -f k8s/product-db.yaml
+          kubectl apply -f k8s/order-db.yaml
+          kubectl apply -f k8s/product-service.yaml
+          kubectl apply -f k8s/order-service.yaml
+
+      - name: Rollout images to this CI SHA
+        env:
+          SHA: ${{ github.sha }}
+          REG: ${{ env.ACR_LOGIN_SERVER }}
+        run: |
+          P=$(kubectl get deploy product-service-w08e1 -o jsonpath='{.spec.template.spec.containers[0].name}')
+          O=$(kubectl get deploy order-service-w08e1   -o jsonpath='{.spec.template.spec.containers[0].name}')
+          kubectl set image deploy/product-service-w08e1 $P=$REG/product_service:$SHA
+          kubectl set image deploy/order-service-w08e1   $O=$REG/order_service:$SHA
+          kubectl rollout status deploy/product-service-w08e1 --timeout=180s
+          kubectl rollout status deploy/order-service-w08e1   --timeout=180s
+
+      - name: Capture backend IPs
+        id: ips
+        run: |
+          PIP=$(kubectl get svc product-service-w08e1 -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+          OIP=$(kubectl get svc order-service-w08e1   -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+          echo "PRODUCT=$PIP" | tee product_ip.txt
+          echo "ORDER=$OIP"   | tee order_ip.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: backend-ips
+          path: |
+            product_ip.txt
+            order_ip.txt
